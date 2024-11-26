@@ -9,9 +9,12 @@ on:
   workflow_dispatch:
 
 jobs:
-  build:
+  stage:
     runs-on: ubuntu-latest
-    timeout-minutes: 2
+    timeout-minutes: 90
+    permissions:
+      packages: write
+      contents: write
     steps:
       - name: Checkout dab
         uses: actions/checkout@v4
@@ -22,80 +25,12 @@ jobs:
         run: echo py_version=`make PYTHON_VERSION` >> $GITHUB_ENV
 
       - name: Install python ${{ env.py_version }}
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v4
         with:
           python-version: ${{ env.py_version }}
 
-      - name: Install python deps
+      - name: Install python deeps
         run: pip install -r requirements/requirements_dev.txt
 
-      - name: Build the dists
-        run: >-
-          ansible-playbook
-          tools/ansible/release.yml
-          -i localhost
-          -e github_token=${{ secrets.GITHUB_TOKEN }}
-          -t build
-
-      - name: Store the distribution packages
-        uses: actions/upload-artifact@v4
-        with:
-          name: python-package-distributions
-          path: |
-            dist/*.tar.gz
-            dist/*.whl
-          retention-days: 90
-
-  publish-pypi:
-    name: Publish to PyPI
-    needs:
-      - build
-
-    runs-on: ubuntu-latest
-
-    timeout-minutes: 1
-
-    environment:
-      name: pypi
-      url: https://pypi.org/project/${{ env.PROJECT_NAME }}
-
-    permissions:
-      contents: read  # This job doesn't need to `git push` anything
-      id-token: write  # PyPI Trusted Publishing (OIDC)
-
-    steps:
-      - name: Download all the dists
-        uses: actions/download-artifact@v4
-        with:
-          name: python-package-distributions
-          path: dist/
-      - name: Publish dists to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
-
-  post-release-repo-update:
-    name: Make a GitHub Release
-    needs:
-      - publish-pypi
-
-    runs-on: ubuntu-latest
-
-    timeout-minutes: 2
-
-    permissions:
-      packages: write
-      contents: write
-
-    steps:
-      - name: Download all the dists
-        uses: actions/download-artifact@v4
-        with:
-          name: python-package-distributions
-          path: dist/
-
-      - name: Create a GitHub Release uploading the dists
-        run: >-
-          ansible-playbook
-          tools/ansible/release.yml
-          -i localhost
-          -e github_token=${{ secrets.GITHUB_TOKEN }}
-          -t github
+      - name: Create release
+        run: ansible-playbook tools/ansible/release.yml -i localhost -e github_token=${{ secrets.GITHUB_TOKEN }}
