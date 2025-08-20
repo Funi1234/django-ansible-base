@@ -1,4 +1,4 @@
-social-auth-app-django==5.4.1
+social-auth-app-django==5.4.2
 social-auth-core<=4.5.4
 tabulate
 
