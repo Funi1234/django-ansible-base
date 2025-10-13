@@ -96,7 +96,7 @@ pyjwt==2.10.1
     #   social-auth-core
 pyrad==2.4
     # via -r requirements/requirements_authentication.in
-python-ldap==3.4.4
+python-ldap==3.4.5
     # via
     #   -r requirements/requirements_authentication.in
     #   django-auth-ldap
