@@ -28,6 +28,7 @@ class ServiceAPIConfig:
         "shared.organization": ResourceTypeProcessor,
         "shared.user": ResourceTypeProcessor,
         "shared.roledefinition": RoleDefinitionProcessor,
+        "shared.aapflag": ResourceTypeProcessor,
     }
 
     custom_resource_processors = {}
