@@ -366,6 +366,7 @@ def get_or_create_authenticator_user(
             defaults={'extra_data': extra_data},
         )
         if created:
-            logger.debug(f"Authenticator {authenticator.name} created AuthenticatorUser for {username}")
+            extra = ' attaching to existing user' if not user_created else ''
+            logger.debug(f"Authenticator {authenticator.name} created AuthenticatorUser for {username}{extra}")
 
     return auth_user.user, auth_user, created
