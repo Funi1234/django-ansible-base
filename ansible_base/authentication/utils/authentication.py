@@ -2,6 +2,10 @@ import importlib
 import logging
 from typing import List, Optional, Tuple, Union
 
+from ansible_base.authentication.authenticator_plugins.utils import get_authenticator_class
+from ansible_base.authentication.models import Authenticator, AuthenticatorUser
+from ansible_base.authentication.social_auth import AuthenticatorStorage, AuthenticatorStrategy
+from ansible_base.authentication.utils.user import normalize_and_get_email
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import AbstractUser
@@ -9,11 +13,6 @@ from django.db.models import Q
 from django.utils.translation import gettext as _
 from social_core.exceptions import AuthException
 from social_core.pipeline.user import get_username
-
-from ansible_base.authentication.authenticator_plugins.utils import get_authenticator_class
-from ansible_base.authentication.models import Authenticator, AuthenticatorUser
-from ansible_base.authentication.social_auth import AuthenticatorStorage, AuthenticatorStrategy
-from ansible_base.authentication.utils.user import normalize_and_get_email
 
 logger = logging.getLogger('ansible_base.authentication.utils.authentication')
 
@@ -321,6 +320,10 @@ def get_or_create_authenticator_user(
         logger.warning(f"AuthException: {e}")
         raise
 
+    # Validate the email parameter early so invalid emails from authenticators
+    # don't get persisted on the AuthenticatorUser record.
+    email = normalize_and_get_email(email) or ""
+
     # Step 1: Determine the username, running the migration logic FIRST. This is the key fix.
     if migrated_username := migrate_from_existing_authenticator(uid=uid, alt_uid=None, authenticator=authenticator, preferred_username=uid):
         username = migrated_username
@@ -342,7 +345,12 @@ def get_or_create_authenticator_user(
             return None, None, None
 
     # Step 3: Get or create the main User model instance.
+    # Validate email before storing on the User model to prevent invalid emails
+    # from being persisted (e.g., UIDs without @ from SAML authenticators).
     details = {k: user_details.get(k, "") for k in ["first_name", "last_name", "email"]}
+    raw_email = details.get("email", "")
+    validated_email = normalize_and_get_email(raw_email)
+    details["email"] = validated_email or ""
     local_user, user_created = get_user_model().objects.get_or_create(username=username, defaults=details)
     if user_created:
         logger.info(f"Authenticator {authenticator.name} created User {username}")
