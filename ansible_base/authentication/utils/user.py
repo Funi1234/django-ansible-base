@@ -1,12 +1,13 @@
 import logging
 from typing import Any, Optional
 
-from ansible_base.authentication.authenticator_plugins.utils import get_authenticator_plugin
-from ansible_base.authentication.models import AuthenticatorUser
-from ansible_base.lib.utils.models import is_system_user
 from django.contrib.auth.models import AbstractUser
 from django.core.exceptions import ValidationError
 from django.core.validators import validate_email as django_validate_email
+
+from ansible_base.authentication.authenticator_plugins.utils import get_authenticator_plugin
+from ansible_base.authentication.models import AuthenticatorUser
+from ansible_base.lib.utils.models import is_system_user
 
 logger = logging.getLogger('ansible_base.authentication.utils.user')
 

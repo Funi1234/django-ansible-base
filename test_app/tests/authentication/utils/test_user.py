@@ -1,6 +1,7 @@
 from unittest import mock
 
 import pytest
+
 from ansible_base.authentication.models import AuthenticatorUser
 from ansible_base.authentication.utils.user import can_user_change_password, normalize_and_get_email
 
