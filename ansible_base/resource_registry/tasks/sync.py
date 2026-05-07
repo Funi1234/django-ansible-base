@@ -231,7 +231,7 @@ class RemoteAssignmentFetcher:
                     return False
 
                 data = resp.json()
-                for assignment in data.get('results', []):
+                for assignment in data.get('results') or []:
                     role_name = assignment['role_definition']
                     if role_name not in self.local_role_names:
                         logger.debug(f"Skipping remote {assignment_type} assignment with unknown local role: {role_name}")
