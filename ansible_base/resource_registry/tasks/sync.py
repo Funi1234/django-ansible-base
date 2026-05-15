@@ -352,7 +352,7 @@ def delete_local_assignment(assignment_tuple: AssignmentTuple) -> bool:
         return True
 
     except Exception as e:
-        logger.error(f"Failed to delete assignment {assignment_tuple}: {e}")
+        logger.exception(f"Failed to delete assignment {assignment_tuple}: {e}")
         return False
 
 
@@ -382,7 +382,7 @@ def create_local_assignment(assignment_tuple: AssignmentTuple) -> bool:
         return True
 
     except Exception as e:
-        logger.error(f"Failed to create assignment {assignment_tuple}: {e}")
+        logger.exception(f"Failed to create assignment {assignment_tuple}: {e}")
         return False
 
 
@@ -420,7 +420,7 @@ def delete_resource(resource: Resource):
     try:
         return resource.delete_resource()
     except Error as exc:  # pragma: no cover
-        logger.error(f"Failed to delete resource {resource.ansible_id}. Received error: {exc}")
+        logger.exception(f"Failed to delete resource {resource.ansible_id}. Received error: {exc}")
         raise ResourceDeletionError() from exc
 
 
@@ -491,12 +491,12 @@ def _attempt_update_resource(
             _handle_conflict(resource_data, resource.resource_type_obj, api_client)
             resource.update_resource(resource_data, partial=True, **kwargs)
         except (ResourceDeletionError, IntegrityError, Error, ValidationError) as e:
-            logger.error(f"Failed to gracefully handle conflict for {resource_data}. Got error {e}.")
+            logger.exception(f"Failed to gracefully handle conflict for {resource_data}. Got error {e}.")
             return SyncResult(SyncStatus.CONFLICT, manifest_item)
     except (Error, ValidationError) as e:
         # Something happened with the database. We don't know what it is. Instead of failing the whole
         # sync, we'll raise an error and skip this for now.
-        logger.error(f"Failed to update resource {resource.ansible_id}. Received error: {e}. Will try again on the next sync.")
+        logger.exception(f"Failed to update resource {resource.ansible_id}. Received error: {e}. Will try again on the next sync.")
         return SyncResult(SyncStatus.ERROR, manifest_item)
 
     return SyncResult(SyncStatus.UPDATED, manifest_item)
@@ -531,12 +531,12 @@ def _attempt_create_resource(
                 service_id=resource_service_id,
             )
         except (ResourceDeletionError, IntegrityError, Error, ValidationError) as e:
-            logger.error(f"Failed to gracefully handle conflict for {resource_data}. Got error {e}.")
+            logger.exception(f"Failed to gracefully handle conflict for {resource_data}. Got error {e}.")
             return SyncResult(SyncStatus.CONFLICT, manifest_item)
     except (Error, ValidationError) as e:
         # Something happened with the database. We don't know what it is. Instead of failing the whole
         # sync, we'll raise an error and skip this for now.
-        logger.error(f"Failed to create {manifest_item.ansible_id}. Received error: {e}. Will try again on the next sync.")
+        logger.exception(f"Failed to create {manifest_item.ansible_id}. Received error: {e}. Will try again on the next sync.")
         return SyncResult(SyncStatus.ERROR, manifest_item)
 
     return SyncResult(SyncStatus.CREATED, manifest_item)
