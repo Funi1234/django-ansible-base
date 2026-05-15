@@ -73,6 +73,18 @@ from test_app.tests.authentication.conftest import ORG_ADMIN_ROLE_NAME, ORG_MEMB
         ),
         pytest.param(
             {"always": {}},
+            "allow",
+            "",
+            {},
+            [],
+            True,
+            None,
+            {"team_membership": {}, "organization_membership": {}, 'rbac_roles': {'system': {'roles': {}}, 'organizations': {}}},
+            [{1: True, 'enabled': True}],
+            id="map_type 'allow' with trigger 'always' sets 'access_allowed' to True (AAP-45394)",
+        ),
+        pytest.param(
+            {"always": {}},
             "team",
             TEAM_MEMBER_ROLE_NAME,
             {},
@@ -2710,3 +2722,192 @@ class TestRefactoredCacheExisting:
         if "Test Role" in cache_instance.cache:
             for content_type_id in expected_skipped_content_types:
                 assert content_type_id not in cache_instance.cache["Test Role"]
+
+
+# --- AAP-45394 regression tests ---
+
+
+@mock.patch("ansible_base.authentication.utils.claims.logger")
+def test_create_claims_allow_grant_no_error_logged(
+    logger,
+    local_authenticator_map,
+    shut_up_logging,
+):
+    """
+    Regression test for AAP-45047: map_type 'allow' with a firing trigger
+    must NOT log an error or fall through to the catch-all else branch.
+    """
+    local_authenticator_map.triggers = {"always": {}}
+    local_authenticator_map.map_type = "allow"
+    local_authenticator_map.save()
+
+    authenticator = local_authenticator_map.authenticator
+    claims.create_claims(authenticator, "username", {}, [])
+
+    logger.error.assert_not_called()
+
+
+def test_create_claims_deny_all_then_allow_override(
+    local_authenticator_map,
+    local_authenticator_map_1,
+):
+    """
+    Regression test for AAP-45394: a deny-all allow map at order=1 must be
+    recoverable by an allow-always allow map at order=2.
+
+    Before the fix the 'allow' branch only triggered when has_permission=False,
+    so the affirmative branch (has_permission=True) was silently dropped and
+    access remained denied.
+    """
+    # order=1: deny-all rule (trigger 'never' -> has_permission=False)
+    local_authenticator_map.map_type = 'allow'
+    local_authenticator_map.triggers = {'never': {}}
+    local_authenticator_map.order = 1
+    local_authenticator_map.save()
+
+    # order=2: allow-always rule (trigger 'always' -> has_permission=True)
+    local_authenticator_map_1.map_type = 'allow'
+    local_authenticator_map_1.triggers = {'always': {}}
+    local_authenticator_map_1.order = 2
+    local_authenticator_map_1.save()
+
+    authenticator = local_authenticator_map.authenticator
+    res = claims.create_claims(authenticator, 'username', {}, [])
+
+    assert res['access_allowed'] is True, 'An allow-always map at order=2 must override a deny-all map at order=1 (AAP-45394)'
+
+
+def test_create_claims_deny_all_not_overridden_without_match(
+    local_authenticator_map,
+    local_authenticator_map_1,
+):
+    """
+    Regression test for AAP-45394: when the user does NOT match the second
+    allow map's trigger, access must remain denied.
+    """
+    # order=1: deny-all
+    local_authenticator_map.map_type = 'allow'
+    local_authenticator_map.triggers = {'never': {}}
+    local_authenticator_map.order = 1
+    local_authenticator_map.save()
+
+    # order=2: allow only for members of group 'special-group'; user has no groups
+    local_authenticator_map_1.map_type = 'allow'
+    local_authenticator_map_1.triggers = {'groups': {'has_or': ['special-group']}}
+    local_authenticator_map_1.order = 2
+    local_authenticator_map_1.save()
+
+    authenticator = local_authenticator_map.authenticator
+    # Pass an empty groups list -- the user is NOT in 'special-group'
+    res = claims.create_claims(authenticator, 'username', {}, [])
+
+    assert res['access_allowed'] is False, 'User not matching the second allow map must remain denied (AAP-45394)'
+
+
+def test_create_claims_deny_all_overridden_with_group_match(
+    local_authenticator_map,
+    local_authenticator_map_1,
+):
+    """
+    Regression test for AAP-45394: when the user DOES match the second allow
+    map's trigger, the deny from the first map must be overridden.
+    """
+    # order=1: deny-all
+    local_authenticator_map.map_type = 'allow'
+    local_authenticator_map.triggers = {'never': {}}
+    local_authenticator_map.order = 1
+    local_authenticator_map.save()
+
+    # order=2: allow for members of 'special-group'
+    local_authenticator_map_1.map_type = 'allow'
+    local_authenticator_map_1.triggers = {'groups': {'has_or': ['special-group']}}
+    local_authenticator_map_1.order = 2
+    local_authenticator_map_1.save()
+
+    authenticator = local_authenticator_map.authenticator
+    # Pass 'special-group' in the groups list -- the user IS in the group
+    res = claims.create_claims(authenticator, 'username', {}, ['special-group'])
+
+    assert res['access_allowed'] is True, 'User matching the second allow map must have access granted despite earlier deny (AAP-45394)'
+
+
+def test_create_claims_allow_then_deny_preserves_deny(
+    local_authenticator_map,
+    local_authenticator_map_1,
+):
+    """
+    Verify the reverse ordering: allow-always at order=1, deny-all at order=2.
+    The later deny must override the earlier allow (last writer wins).
+    """
+    local_authenticator_map.map_type = 'allow'
+    local_authenticator_map.triggers = {'always': {}}
+    local_authenticator_map.order = 1
+    local_authenticator_map.save()
+
+    local_authenticator_map_1.map_type = 'allow'
+    local_authenticator_map_1.triggers = {'never': {}}
+    local_authenticator_map_1.order = 2
+    local_authenticator_map_1.save()
+
+    authenticator = local_authenticator_map.authenticator
+    res = claims.create_claims(authenticator, 'username', {}, [])
+
+    assert res['access_allowed'] is False, 'A deny-all map at order=2 must override an allow-always map at order=1'
+
+
+def test_create_claims_revoke_deny_overridden_by_later_allow(
+    local_authenticator_map,
+    local_authenticator_map_1,
+):
+    """
+    A revoke=True allow map whose trigger does not match converts SKIP to DENY.
+    A subsequent allow-always map must override that denial (last writer wins).
+    """
+    # order=1: allow for group 'admins' with revoke=True
+    # user NOT in admins -> SKIP -> revoke converts to DENY -> access_allowed=False
+    local_authenticator_map.map_type = 'allow'
+    local_authenticator_map.triggers = {'groups': {'has_or': ['admins']}}
+    local_authenticator_map.revoke = True
+    local_authenticator_map.order = 1
+    local_authenticator_map.save()
+
+    # order=2: allow-always -> access_allowed=True
+    local_authenticator_map_1.map_type = 'allow'
+    local_authenticator_map_1.triggers = {'always': {}}
+    local_authenticator_map_1.order = 2
+    local_authenticator_map_1.save()
+
+    authenticator = local_authenticator_map.authenticator
+    res = claims.create_claims(authenticator, 'username', {}, [])
+
+    assert res['access_allowed'] is True, 'An allow-always map must override a revoke-deny from an earlier map'
+
+
+def test_create_claims_three_maps_last_writer_wins(
+    local_authenticator_map,
+    local_authenticator_map_1,
+    local_authenticator_map_2,
+):
+    """
+    Three allow maps: allow(1) -> deny(2) -> allow(3).
+    The last evaluated map must win.
+    """
+    local_authenticator_map.map_type = 'allow'
+    local_authenticator_map.triggers = {'always': {}}
+    local_authenticator_map.order = 1
+    local_authenticator_map.save()
+
+    local_authenticator_map_1.map_type = 'allow'
+    local_authenticator_map_1.triggers = {'never': {}}
+    local_authenticator_map_1.order = 2
+    local_authenticator_map_1.save()
+
+    local_authenticator_map_2.map_type = 'allow'
+    local_authenticator_map_2.triggers = {'always': {}}
+    local_authenticator_map_2.order = 3
+    local_authenticator_map_2.save()
+
+    authenticator = local_authenticator_map.authenticator
+    res = claims.create_claims(authenticator, 'username', {}, [])
+
+    assert res['access_allowed'] is True, 'The last allow map (order=3, always) must win over the deny at order=2'
