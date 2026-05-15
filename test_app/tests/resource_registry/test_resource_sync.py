@@ -662,3 +662,57 @@ def test_get_remote_assignments_handles_null_results():
     # Should complete successfully without TypeError
     assert result.is_complete is True
     assert len(result.assignments) == 0
+
+
+@pytest.mark.django_db
+def test_delete_local_assignment_exception_handling(static_api_client, stdout):
+    """Test that delete_local_assignment logs exceptions with logger.exception."""
+    from ansible_base.resource_registry.tasks.sync import delete_local_assignment
+
+    # Create an assignment tuple that will cause an exception
+    assignment_tuple = AssignmentTuple(
+        actor_ansible_id='nonexistent-user-id',
+        ansible_id_or_pk='1',
+        role_definition_name='Team Member',
+        assignment_type='user',
+    )
+
+    # Should return False and log the exception
+    result = delete_local_assignment(assignment_tuple)
+    assert result is False
+
+
+@pytest.mark.django_db
+def test_create_local_assignment_exception_handling(static_api_client, stdout):
+    """Test that create_local_assignment logs exceptions with logger.exception."""
+    from ansible_base.resource_registry.tasks.sync import create_local_assignment
+
+    # Create an assignment tuple that will cause an exception
+    assignment_tuple = AssignmentTuple(
+        actor_ansible_id='nonexistent-user-id',
+        ansible_id_or_pk='1',
+        role_definition_name='Team Member',
+        assignment_type='user',
+    )
+
+    # Should return False and log the exception
+    result = create_local_assignment(assignment_tuple)
+    assert result is False
+
+
+@pytest.mark.django_db
+def test_attempt_update_resource_conflict_exception(static_api_client, resource_to_update):
+    """Test that _attempt_update_resource conflict handler logs exceptions with logger.exception."""
+    from django.db.utils import IntegrityError
+
+    resource = Resource.objects.get(ansible_id="97447387-8596-404f-b0d0-6429b04c8d22")
+    manifest_item = ManifestItem("97447387-8596-404f-b0d0-6429b04c8d22", str(uuid4()), {})
+    resource_data = {"username": "theceo", "email": "theceo@example.com"}
+
+    # Mock update_resource to raise IntegrityError, then _handle_conflict to raise another error
+    with (
+        mock.patch.object(resource, 'update_resource', side_effect=IntegrityError("Duplicate key")),
+        mock.patch('ansible_base.resource_registry.tasks.sync._handle_conflict', side_effect=Error("Conflict handling failed")),
+    ):
+        result = _attempt_update_resource(manifest_item, resource, resource_data, static_api_client)
+        assert result.status == 'conflict'
