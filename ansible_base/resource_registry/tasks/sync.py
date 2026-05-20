@@ -352,7 +352,7 @@ def delete_local_assignment(assignment_tuple: AssignmentTuple) -> bool:
 
         return True
 
-    except Exception as e:
+    except Exception:
         logger.exception(f"Failed to delete assignment {assignment_tuple}")
         return False
 
@@ -382,7 +382,7 @@ def create_local_assignment(assignment_tuple: AssignmentTuple) -> bool:
 
         return True
 
-    except Exception as e:
+    except Exception:
         logger.exception(f"Failed to create assignment {assignment_tuple}")
         return False
 
@@ -491,10 +491,10 @@ def _attempt_update_resource(
         try:
             _handle_conflict(resource_data, resource.resource_type_obj, api_client)
             resource.update_resource(resource_data, partial=True, **kwargs)
-        except (ResourceDeletionError, IntegrityError, Error, ValidationError) as e:
+        except (ResourceDeletionError, IntegrityError, Error, ValidationError):
             logger.exception(f"Failed to gracefully handle conflict for {resource_data}")
             return SyncResult(SyncStatus.CONFLICT, manifest_item)
-    except (Error, ValidationError) as e:
+    except (Error, ValidationError):
         # Something happened with the database. We don't know what it is. Instead of failing the whole
         # sync, we'll raise an error and skip this for now.
         logger.exception(f"Failed to update resource {resource.ansible_id}. Will try again on the next sync.")
@@ -531,10 +531,10 @@ def _attempt_create_resource(
                 ansible_id=manifest_item.ansible_id,
                 service_id=resource_service_id,
             )
-        except (ResourceDeletionError, IntegrityError, Error, ValidationError) as e:
+        except (ResourceDeletionError, IntegrityError, Error, ValidationError):
             logger.exception(f"Failed to gracefully handle conflict for {resource_data}")
             return SyncResult(SyncStatus.CONFLICT, manifest_item)
-    except (Error, ValidationError) as e:
+    except (Error, ValidationError):
         # Something happened with the database. We don't know what it is. Instead of failing the whole
         # sync, we'll raise an error and skip this for now.
         logger.exception(f"Failed to create {manifest_item.ansible_id}. Will try again on the next sync.")
