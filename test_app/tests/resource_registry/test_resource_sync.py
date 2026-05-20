@@ -716,3 +716,560 @@ def test_attempt_update_resource_conflict_exception(static_api_client, resource_
     ):
         result = _attempt_update_resource(manifest_item, resource, resource_data, static_api_client)
         assert result.status == 'conflict'
+
+
+@pytest.mark.django_db
+def test_attempt_update_resource_error_exception(static_api_client, resource_to_update):
+    """Test that _attempt_update_resource error handler logs exceptions with logger.exception."""
+    resource = Resource.objects.get(ansible_id="97447387-8596-404f-b0d0-6429b04c8d22")
+    manifest_item = ManifestItem("97447387-8596-404f-b0d0-6429b04c8d22", str(uuid4()), {})
+    resource_data = {"username": "theceo", "email": "theceo@example.com"}
+
+    # Mock update_resource to raise Error directly (not IntegrityError)
+    with mock.patch.object(resource, 'update_resource', side_effect=Error("Database error")):
+        result = _attempt_update_resource(manifest_item, resource, resource_data, static_api_client)
+        assert result.status == 'error'
+
+
+@pytest.mark.django_db
+def test_delete_resource_exception_handling():
+    """Test that delete_resource logs exceptions with logger.exception."""
+    from ansible_base.resource_registry.tasks.sync import ResourceDeletionError, delete_resource
+    from test_app.models import User
+
+    # Create a user (which will auto-create a Resource via signals)
+    user = User.objects.create(username='testuser', email='test@example.com')
+    resource = Resource.get_resource_for_object(user)
+
+    # Mock delete_resource to raise an Error
+    with mock.patch.object(resource, 'delete_resource', side_effect=Error("Delete failed")):
+        with pytest.raises(ResourceDeletionError):
+            delete_resource(resource)
+
+
+@override_settings(RESOURCE_JWT_USER_ID='test-user-id', RESOURCE_SERVICE_PATH='/api/v1/', RESOURCE_SYNC_JWT_EXPIRATION=120)
+@mock.patch('ansible_base.resource_registry.tasks.sync.get_resource_server_client')
+def test_create_api_client_with_jwt_user_id(mock_get_client):
+    """Test create_api_client includes jwt_user_id when set in settings."""
+    create_api_client()
+
+    mock_get_client.assert_called_once_with(
+        raise_if_bad_request=False,
+        jwt_user_id='test-user-id',
+        service_path='/api/v1/',
+        jwt_expiration=120,
+    )
+
+
+@override_settings(RESOURCE_SERVICE_PATH='')
+def test_create_api_client_missing_service_path():
+    """Test create_api_client raises ValueError when RESOURCE_SERVICE_PATH is not set."""
+    with pytest.raises(ValueError, match="RESOURCE_SERVICE_PATH is not set"):
+        create_api_client()
+
+
+@pytest.mark.django_db
+def test_get_ansible_id_or_pk_for_organization():
+    """Test get_ansible_id_or_pk returns ansible_id for organization assignments."""
+    from ansible_base.rbac.models import DABContentType, RoleDefinition
+    from ansible_base.resource_registry.tasks.sync import get_ansible_id_or_pk
+    from test_app.models import Organization, User
+
+    # Create an organization with resource
+    org = Organization.objects.create(name='Test Org')
+    org_resource = Resource.get_resource_for_object(org)
+    org_dab_ct = DABContentType.objects.get_for_model(Organization)
+
+    # Create a role definition and assignment
+    role_def = RoleDefinition.objects.create(name='Org Admin', content_type=org_dab_ct, managed=True)
+    user = User.objects.create(username='testuser', email='test@example.com')
+    assignment = role_def.give_permission(user, org)
+
+    # Test get_ansible_id_or_pk
+    result = get_ansible_id_or_pk(assignment)
+    assert result == str(org_resource.ansible_id)
+
+
+@pytest.mark.django_db
+def test_get_ansible_id_or_pk_for_team():
+    """Test get_ansible_id_or_pk returns ansible_id for team assignments."""
+    from ansible_base.rbac.models import DABContentType, RoleDefinition
+    from ansible_base.resource_registry.tasks.sync import get_ansible_id_or_pk
+    from test_app.models import Organization, Team, User
+
+    # Create a team with resource
+    org = Organization.objects.create(name='Test Org')
+    team = Team.objects.create(name='Test Team', organization=org)
+    team_resource = Resource.get_resource_for_object(team)
+    team_dab_ct = DABContentType.objects.get_for_model(Team)
+
+    # Create a role definition and assignment
+    role_def = RoleDefinition.objects.create(name='Team Admin', content_type=team_dab_ct, managed=True)
+    user = User.objects.create(username='testuser', email='test@example.com')
+    assignment = role_def.give_permission(user, team)
+
+    # Test get_ansible_id_or_pk
+    result = get_ansible_id_or_pk(assignment)
+    assert result == str(team_resource.ansible_id)
+
+
+@pytest.mark.django_db
+def test_get_ansible_id_or_pk_raises_for_missing_resource():
+    """Test get_ansible_id_or_pk raises RuntimeError when organization has no Resource."""
+    from ansible_base.rbac.models import DABContentType, RoleDefinition
+    from ansible_base.resource_registry.tasks.sync import get_ansible_id_or_pk
+    from test_app.models import Organization, User
+
+    # Create an organization
+    org = Organization.objects.create(name='Test Org')
+    org_resource = Resource.get_resource_for_object(org)
+    org_dab_ct = DABContentType.objects.get_for_model(Organization)
+    # Delete the resource to simulate missing resource
+    org_resource.delete()
+
+    # Create a role definition and assignment
+    role_def = RoleDefinition.objects.create(name='Org Admin', content_type=org_dab_ct, managed=True)
+    user = User.objects.create(username='testuser', email='test@example.com')
+    assignment = role_def.give_permission(user, org)
+
+    # Test get_ansible_id_or_pk raises
+    with pytest.raises(RuntimeError, match="organization .* was found without an associated Resource"):
+        get_ansible_id_or_pk(assignment)
+
+
+@pytest.mark.django_db
+def test_get_content_object_for_organization():
+    """Test get_content_object retrieves organization by ansible_id."""
+    from ansible_base.rbac.models import DABContentType, RoleDefinition
+    from ansible_base.resource_registry.tasks.sync import get_content_object
+    from test_app.models import Organization
+
+    # Create an organization
+    org = Organization.objects.create(name='Test Org')
+    org_resource = Resource.get_resource_for_object(org)
+
+    # Create role definition
+    role_def = RoleDefinition.objects.create(name='Org Admin', content_type=DABContentType.objects.get_for_model(Organization), managed=True)
+
+    # Create assignment tuple
+    assignment_tuple = AssignmentTuple(
+        actor_ansible_id=str(uuid4()),
+        ansible_id_or_pk=str(org_resource.ansible_id),
+        role_definition_name='Org Admin',
+        assignment_type='user',
+    )
+
+    result = get_content_object(role_def, assignment_tuple)
+    assert result == org
+
+
+@pytest.mark.django_db
+def test_get_content_object_for_team():
+    """Test get_content_object retrieves team by ansible_id."""
+    from ansible_base.rbac.models import DABContentType, RoleDefinition
+    from ansible_base.resource_registry.tasks.sync import get_content_object
+    from test_app.models import Organization, Team
+
+    # Create a team
+    org = Organization.objects.create(name='Test Org')
+    team = Team.objects.create(name='Test Team', organization=org)
+    team_resource = Resource.get_resource_for_object(team)
+
+    # Create role definition
+    role_def = RoleDefinition.objects.create(name='Team Admin', content_type=DABContentType.objects.get_for_model(Team), managed=True)
+
+    # Create assignment tuple
+    assignment_tuple = AssignmentTuple(
+        actor_ansible_id=str(uuid4()),
+        ansible_id_or_pk=str(team_resource.ansible_id),
+        role_definition_name='Team Admin',
+        assignment_type='user',
+    )
+
+    result = get_content_object(role_def, assignment_tuple)
+    assert result == team
+
+
+@pytest.mark.django_db
+def test_get_local_assignments_skips_users_without_resources():
+    """Test get_local_assignments skips user assignments when user has no Resource."""
+    from ansible_base.rbac.models import RoleDefinition
+    from ansible_base.resource_registry.tasks.sync import get_local_assignments
+    from test_app.models import User
+
+    # Create a user with resource
+    user = User.objects.create(username='testuser', email='test@example.com')
+    user_resource = Resource.get_resource_for_object(user)
+
+    # Create a global role assignment
+    role_def = RoleDefinition.objects.create(name='Global Admin', managed=True)
+    role_def.give_global_permission(user)
+
+    # Delete the user's resource to simulate missing resource
+    user_resource.delete()
+
+    # Get local assignments - should skip the user assignment
+    assignments = get_local_assignments()
+    assert len([a for a in assignments if a.assignment_type == 'user']) == 0
+
+
+@pytest.mark.django_db
+def test_get_local_assignments_skips_teams_without_resources():
+    """Test get_local_assignments skips team assignments when team has no Resource."""
+    from ansible_base.rbac.models import RoleDefinition
+    from ansible_base.resource_registry.tasks.sync import get_local_assignments
+    from test_app.models import Organization, Team
+
+    # Create a team with resource
+    org = Organization.objects.create(name='Test Org')
+    team = Team.objects.create(name='Test Team', organization=org)
+    team_resource = Resource.get_resource_for_object(team)
+
+    # Create a global role assignment
+    role_def = RoleDefinition.objects.create(name='Global Admin', managed=True)
+    role_def.give_global_permission(team)
+
+    # Delete the team's resource to simulate missing resource
+    team_resource.delete()
+
+    # Get local assignments - should skip the team assignment
+    assignments = get_local_assignments()
+    assert len([a for a in assignments if a.assignment_type == 'team']) == 0
+
+
+@pytest.mark.django_db
+def test_get_local_assignments_with_object_scoped_user_assignment():
+    """Test get_local_assignments includes object-scoped user assignments."""
+    from ansible_base.rbac.models import DABContentType, RoleDefinition
+    from ansible_base.resource_registry.tasks.sync import get_local_assignments
+    from test_app.models import Organization, User
+
+    # Create a user and organization
+    user = User.objects.create(username='testuser', email='test@example.com')
+    user_resource = Resource.get_resource_for_object(user)
+    org = Organization.objects.create(name='Test Org')
+    org_resource = Resource.get_resource_for_object(org)
+    org_dab_ct = DABContentType.objects.get_for_model(Organization)
+
+    # Create an object-scoped role assignment
+    role_def = RoleDefinition.objects.create(name='Org Admin', content_type=org_dab_ct, managed=True)
+    role_def.give_permission(user, org)
+
+    # Get local assignments
+    assignments = get_local_assignments()
+    user_assignments = [a for a in assignments if a.assignment_type == 'user']
+
+    assert len(user_assignments) == 1
+    assert user_assignments[0].actor_ansible_id == str(user_resource.ansible_id)
+    assert user_assignments[0].ansible_id_or_pk == str(org_resource.ansible_id)
+    assert user_assignments[0].role_definition_name == 'Org Admin'
+
+
+@pytest.mark.django_db
+def test_get_local_assignments_with_object_scoped_team_assignment():
+    """Test get_local_assignments includes object-scoped team assignments."""
+    from ansible_base.rbac.models import DABContentType, RoleDefinition
+    from ansible_base.resource_registry.tasks.sync import get_local_assignments
+    from test_app.models import Organization, Team
+
+    # Create a team and organization
+    org = Organization.objects.create(name='Test Org')
+    team = Team.objects.create(name='Test Team', organization=org)
+    team_resource = Resource.get_resource_for_object(team)
+    target_org = Organization.objects.create(name='Target Org')
+    target_org_resource = Resource.get_resource_for_object(target_org)
+    target_org_dab_ct = DABContentType.objects.get_for_model(Organization)
+
+    # Create an object-scoped role assignment
+    role_def = RoleDefinition.objects.create(name='Org Admin', content_type=target_org_dab_ct, managed=True)
+    role_def.give_permission(team, target_org)
+
+    # Get local assignments
+    assignments = get_local_assignments()
+    team_assignments = [a for a in assignments if a.assignment_type == 'team']
+
+    assert len(team_assignments) == 1
+    assert team_assignments[0].actor_ansible_id == str(team_resource.ansible_id)
+    assert team_assignments[0].ansible_id_or_pk == str(target_org_resource.ansible_id)
+    assert team_assignments[0].role_definition_name == 'Org Admin'
+
+
+def test_assignment_tuple_equality_with_non_tuple():
+    """Test AssignmentTuple.__eq__ returns False for non-AssignmentTuple objects."""
+    from ansible_base.resource_registry.tasks.sync import AssignmentTuple
+
+    tuple1 = AssignmentTuple(
+        actor_ansible_id='user123',
+        ansible_id_or_pk='obj456',
+        role_definition_name='Admin',
+        assignment_type='user',
+    )
+
+    # Test with non-AssignmentTuple objects
+    assert tuple1 != "not an assignment tuple"
+    assert tuple1 != 123
+    assert tuple1 is not None
+    assert tuple1 != {'actor_ansible_id': 'user123'}
+
+
+def test_assignment_tuple_equality_comparison():
+    """Test AssignmentTuple.__eq__ field comparison for equal and unequal tuples."""
+    from ansible_base.resource_registry.tasks.sync import AssignmentTuple
+
+    tuple1 = AssignmentTuple(
+        actor_ansible_id='user123',
+        ansible_id_or_pk='obj456',
+        role_definition_name='Admin',
+        assignment_type='user',
+    )
+    tuple2 = AssignmentTuple(
+        actor_ansible_id='user123',
+        ansible_id_or_pk='obj456',
+        role_definition_name='Admin',
+        assignment_type='user',
+    )
+    tuple3 = AssignmentTuple(
+        actor_ansible_id='user999',
+        ansible_id_or_pk='obj456',
+        role_definition_name='Admin',
+        assignment_type='user',
+    )
+
+    # Test equality - should compare all fields
+    assert tuple1 == tuple2
+    # Test inequality - different actor_ansible_id
+    assert tuple1 != tuple3
+
+
+@pytest.mark.django_db
+def test_get_ansible_id_or_pk_for_non_org_team():
+    """Test get_ansible_id_or_pk returns object_id for non-org/team models."""
+    from ansible_base.rbac.models import DABContentType, RoleDefinition
+    from ansible_base.resource_registry.tasks.sync import get_ansible_id_or_pk
+    from test_app.models import Inventory, Organization
+
+    # Create inventory (not org/team)
+    org = Organization.objects.create(name='Test Org')
+    inventory = Inventory.objects.create(name='Test Inventory', organization=org)
+    inv_dab_ct = DABContentType.objects.get_for_model(Inventory)
+
+    # Create role and assignment
+    role_def = RoleDefinition.objects.create(name='Inventory Admin', content_type=inv_dab_ct, managed=True)
+    from test_app.models import User
+
+    user = User.objects.create(username='testuser', email='test@example.com')
+    assignment = role_def.give_permission(user, inventory)
+
+    # Should return object_id (pk) instead of ansible_id
+    result = get_ansible_id_or_pk(assignment)
+    assert result == str(inventory.pk)
+
+
+@pytest.mark.django_db
+def test_get_content_object_for_non_org_team():
+    """Test get_content_object retrieves non-org/team objects by pk."""
+    from ansible_base.rbac.models import DABContentType, RoleDefinition
+    from ansible_base.resource_registry.tasks.sync import AssignmentTuple, get_content_object
+    from test_app.models import Inventory, Organization
+
+    # Create inventory
+    org = Organization.objects.create(name='Test Org')
+    inventory = Inventory.objects.create(name='Test Inventory', organization=org)
+    inv_dab_ct = DABContentType.objects.get_for_model(Inventory)
+
+    # Create role definition
+    role_def = RoleDefinition.objects.create(name='Inventory Admin', content_type=inv_dab_ct, managed=True)
+
+    # Create assignment tuple with pk (not ansible_id)
+    assignment_tuple = AssignmentTuple(
+        actor_ansible_id='user123',
+        ansible_id_or_pk=str(inventory.pk),
+        role_definition_name='Inventory Admin',
+        assignment_type='user',
+    )
+
+    result = get_content_object(role_def, assignment_tuple)
+    assert result == inventory
+
+
+@pytest.mark.django_db
+@mock.patch('ansible_base.resource_registry.tasks.sync.RemoteAssignmentFetcher._paginate')
+def test_get_remote_assignments_fails_on_user_pagination(mock_paginate):
+    """Test get_remote_assignments returns incomplete when user pagination fails."""
+    from ansible_base.resource_registry.tasks.sync import create_api_client, get_remote_assignments
+
+    # Make user pagination fail
+    mock_paginate.return_value = False
+
+    api_client = create_api_client()
+    result = get_remote_assignments(api_client)
+
+    # Should be incomplete when users_ok is False
+    assert result.is_complete is False
+    assert len(result.assignments) == 0
+
+
+@pytest.mark.django_db
+def test_create_local_assignment_with_object():
+    """Test create_local_assignment creates object-scoped assignment."""
+    from ansible_base.rbac.models import DABContentType, RoleDefinition, RoleUserAssignment
+    from ansible_base.resource_registry.tasks.sync import AssignmentTuple, create_local_assignment
+    from test_app.models import Organization, User
+
+    # Create user and organization with resources
+    user = User.objects.create(username='testuser', email='test@example.com')
+    user_resource = Resource.get_resource_for_object(user)
+    org = Organization.objects.create(name='Test Org')
+    org_resource = Resource.get_resource_for_object(org)
+    org_dab_ct = DABContentType.objects.get_for_model(Organization)
+
+    # Create role definition
+    role_def = RoleDefinition.objects.create(name='Org Admin', content_type=org_dab_ct, managed=True)
+
+    # Create assignment tuple for object-scoped assignment
+    assignment_tuple = AssignmentTuple(
+        actor_ansible_id=str(user_resource.ansible_id),
+        ansible_id_or_pk=str(org_resource.ansible_id),
+        role_definition_name='Org Admin',
+        assignment_type='user',
+    )
+
+    # Create the assignment
+    result = create_local_assignment(assignment_tuple)
+
+    # Should return True and create the assignment
+    assert result is True
+    assert RoleUserAssignment.objects.filter(user=user, role_definition=role_def, object_id=org.pk).exists()
+
+
+@pytest.mark.django_db
+def test_create_local_assignment_global():
+    """Test create_local_assignment creates global assignment."""
+    from ansible_base.rbac.models import RoleDefinition, RoleUserAssignment
+    from ansible_base.resource_registry.tasks.sync import AssignmentTuple, create_local_assignment
+    from test_app.models import User
+
+    # Create user with resource
+    user = User.objects.create(username='testuser', email='test@example.com')
+    user_resource = Resource.get_resource_for_object(user)
+
+    # Create global role definition (no content_type)
+    role_def = RoleDefinition.objects.create(name='Global Admin', managed=True)
+
+    # Create assignment tuple for global assignment (no ansible_id_or_pk)
+    assignment_tuple = AssignmentTuple(
+        actor_ansible_id=str(user_resource.ansible_id),
+        ansible_id_or_pk=None,
+        role_definition_name='Global Admin',
+        assignment_type='user',
+    )
+
+    # Create the assignment
+    result = create_local_assignment(assignment_tuple)
+
+    # Should return True and create global assignment
+    assert result is True
+    assert RoleUserAssignment.objects.filter(user=user, role_definition=role_def, object_id__isnull=True).exists()
+
+
+@pytest.mark.django_db
+def test_create_local_assignment_for_team():
+    """Test create_local_assignment creates team assignment."""
+    from ansible_base.rbac.models import DABContentType, RoleDefinition, RoleTeamAssignment
+    from ansible_base.resource_registry.tasks.sync import AssignmentTuple, create_local_assignment
+    from test_app.models import Organization, Team
+
+    # Create team and organization with resources
+    org = Organization.objects.create(name='Test Org')
+    team = Team.objects.create(name='Test Team', organization=org)
+    team_resource = Resource.get_resource_for_object(team)
+    target_org = Organization.objects.create(name='Target Org')
+    target_org_resource = Resource.get_resource_for_object(target_org)
+    org_dab_ct = DABContentType.objects.get_for_model(Organization)
+
+    # Create role definition
+    role_def = RoleDefinition.objects.create(name='Org Admin', content_type=org_dab_ct, managed=True)
+
+    # Create assignment tuple for team assignment
+    assignment_tuple = AssignmentTuple(
+        actor_ansible_id=str(team_resource.ansible_id),
+        ansible_id_or_pk=str(target_org_resource.ansible_id),
+        role_definition_name='Org Admin',
+        assignment_type='team',
+    )
+
+    # Create the assignment
+    result = create_local_assignment(assignment_tuple)
+
+    # Should return True and create the team assignment
+    assert result is True
+    assert RoleTeamAssignment.objects.filter(team=team, role_definition=role_def, object_id=target_org.pk).exists()
+
+
+@pytest.mark.django_db
+def test_delete_local_assignment_with_object():
+    """Test delete_local_assignment removes object-scoped assignment."""
+    from ansible_base.rbac.models import DABContentType, RoleDefinition
+    from ansible_base.resource_registry.tasks.sync import AssignmentTuple, delete_local_assignment
+    from test_app.models import Organization, User
+
+    # Create user and organization with resources
+    user = User.objects.create(username='testuser', email='test@example.com')
+    user_resource = Resource.get_resource_for_object(user)
+    org = Organization.objects.create(name='Test Org')
+    org_resource = Resource.get_resource_for_object(org)
+    org_dab_ct = DABContentType.objects.get_for_model(Organization)
+
+    # Create role and assignment
+    role_def = RoleDefinition.objects.create(name='Org Admin', content_type=org_dab_ct, managed=True)
+    role_def.give_permission(user, org)
+
+    # Create assignment tuple for object-scoped assignment
+    assignment_tuple = AssignmentTuple(
+        actor_ansible_id=str(user_resource.ansible_id),
+        ansible_id_or_pk=str(org_resource.ansible_id),
+        role_definition_name='Org Admin',
+        assignment_type='user',
+    )
+
+    # Delete the assignment
+    result = delete_local_assignment(assignment_tuple)
+
+    # Should return True and remove the assignment
+    assert result is True
+    from ansible_base.rbac.models import RoleUserAssignment
+
+    assert not RoleUserAssignment.objects.filter(user=user, role_definition=role_def, object_id=org.pk).exists()
+
+
+@pytest.mark.django_db
+def test_delete_local_assignment_global():
+    """Test delete_local_assignment removes global assignment"""
+    from ansible_base.rbac.models import RoleDefinition
+    from ansible_base.resource_registry.tasks.sync import AssignmentTuple, delete_local_assignment
+    from test_app.models import User
+
+    # Create user with resource
+    user = User.objects.create(username='testuser', email='test@example.com')
+    user_resource = Resource.get_resource_for_object(user)
+
+    # Create global role and assignment
+    role_def = RoleDefinition.objects.create(name='Global Admin', managed=True)
+    role_def.give_global_permission(user)
+
+    # Create assignment tuple for global assignment
+    assignment_tuple = AssignmentTuple(
+        actor_ansible_id=str(user_resource.ansible_id),
+        ansible_id_or_pk=None,
+        role_definition_name='Global Admin',
+        assignment_type='user',
+    )
+
+    # Delete the assignment
+    result = delete_local_assignment(assignment_tuple)
+
+    # Should return True and remove global assignment
+    assert result is True
+    from ansible_base.rbac.models import RoleUserAssignment
+
+    assert not RoleUserAssignment.objects.filter(user=user, role_definition=role_def, object_id__isnull=True).exists()
