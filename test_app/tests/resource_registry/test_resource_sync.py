@@ -734,7 +734,7 @@ def test_attempt_update_resource_error_exception(static_api_client, resource_to_
 @pytest.mark.django_db
 def test_delete_resource_exception_handling():
     """Test that delete_resource logs exceptions with logger.exception."""
-    from ansible_base.resource_registry.tasks.sync import delete_resource, ResourceDeletionError
+    from ansible_base.resource_registry.tasks.sync import ResourceDeletionError, delete_resource
 
     # Create a resource
     resource = Resource.objects.create(
