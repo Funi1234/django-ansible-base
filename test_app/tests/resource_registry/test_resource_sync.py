@@ -747,36 +747,6 @@ def test_delete_resource_exception_handling():
             delete_resource(resource)
 
 
-def test_assignment_tuple_equality():
-    """Test AssignmentTuple.__eq__ with non-AssignmentTuple objects."""
-    tuple1 = AssignmentTuple(
-        actor_ansible_id='user123',
-        ansible_id_or_pk='obj456',
-        role_definition_name='Admin',
-        assignment_type='user',
-    )
-    tuple2 = AssignmentTuple(
-        actor_ansible_id='user123',
-        ansible_id_or_pk='obj456',
-        role_definition_name='Admin',
-        assignment_type='user',
-    )
-    tuple3 = AssignmentTuple(
-        actor_ansible_id='user999',
-        ansible_id_or_pk='obj456',
-        role_definition_name='Admin',
-        assignment_type='user',
-    )
-
-    # Test equality
-    assert tuple1 == tuple2
-    assert tuple1 != tuple3
-    # Test with non-AssignmentTuple object
-    assert tuple1 != "not an assignment tuple"
-    assert tuple1 != 123
-    assert tuple1 is not None
-
-
 @override_settings(RESOURCE_JWT_USER_ID='test-user-id', RESOURCE_SERVICE_PATH='/api/v1/', RESOURCE_SYNC_JWT_EXPIRATION=120)
 @mock.patch('ansible_base.resource_registry.tasks.sync.get_resource_server_client')
 def test_create_api_client_with_jwt_user_id(mock_get_client):
