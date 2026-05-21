@@ -716,3 +716,34 @@ def test_attempt_update_resource_conflict_exception(static_api_client, resource_
     ):
         result = _attempt_update_resource(manifest_item, resource, resource_data, static_api_client)
         assert result.status == 'conflict'
+
+
+@pytest.mark.django_db
+def test_attempt_update_resource_error_exception(static_api_client, resource_to_update):
+    """Test that _attempt_update_resource error handler logs exceptions with logger.exception."""
+    resource = Resource.objects.get(ansible_id="97447387-8596-404f-b0d0-6429b04c8d22")
+    manifest_item = ManifestItem("97447387-8596-404f-b0d0-6429b04c8d22", str(uuid4()), {})
+    resource_data = {"username": "theceo", "email": "theceo@example.com"}
+
+    # Mock update_resource to raise Error directly (not IntegrityError)
+    with mock.patch.object(resource, 'update_resource', side_effect=Error("Database error")):
+        result = _attempt_update_resource(manifest_item, resource, resource_data, static_api_client)
+        assert result.status == 'error'
+
+
+@pytest.mark.django_db
+def test_delete_resource_exception_handling():
+    """Test that delete_resource logs exceptions with logger.exception."""
+    from ansible_base.resource_registry.tasks.sync import delete_resource, ResourceDeletionError
+
+    # Create a resource
+    resource = Resource.objects.create(
+        ansible_id=str(uuid4()),
+        resource_type='shared.user',
+        service_id=str(uuid4()),
+    )
+
+    # Mock delete_resource to raise an Error
+    with mock.patch.object(resource, 'delete_resource', side_effect=Error("Delete failed")):
+        with pytest.raises(ResourceDeletionError):
+            delete_resource(resource)
