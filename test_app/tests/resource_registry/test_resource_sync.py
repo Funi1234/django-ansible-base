@@ -992,3 +992,89 @@ def test_get_local_assignments_with_object_scoped_team_assignment():
     assert team_assignments[0].actor_ansible_id == str(team_resource.ansible_id)
     assert team_assignments[0].ansible_id_or_pk == str(target_org_resource.ansible_id)
     assert team_assignments[0].role_definition_name == 'Org Admin'
+
+
+def test_assignment_tuple_equality_with_non_tuple():
+    """Test AssignmentTuple.__eq__ returns False for non-AssignmentTuple objects."""
+    from ansible_base.resource_registry.tasks.sync import AssignmentTuple
+
+    tuple1 = AssignmentTuple(
+        actor_ansible_id='user123',
+        ansible_id_or_pk='obj456',
+        role_definition_name='Admin',
+        assignment_type='user',
+    )
+
+    # Test with non-AssignmentTuple objects
+    assert tuple1 != "not an assignment tuple"
+    assert tuple1 != 123
+    assert tuple1 is not None
+    assert tuple1 != {'actor_ansible_id': 'user123'}
+
+
+@pytest.mark.django_db
+def test_get_ansible_id_or_pk_for_non_org_team():
+    """Test get_ansible_id_or_pk returns object_id for non-org/team models."""
+    from ansible_base.rbac.models import DABContentType, RoleDefinition
+    from ansible_base.resource_registry.tasks.sync import get_ansible_id_or_pk
+    from test_app.models import Inventory, Organization
+
+    # Create inventory (not org/team)
+    org = Organization.objects.create(name='Test Org')
+    inventory = Inventory.objects.create(name='Test Inventory', organization=org)
+    inv_dab_ct = DABContentType.objects.get_for_model(Inventory)
+
+    # Create role and assignment
+    role_def = RoleDefinition.objects.create(name='Inventory Admin', content_type=inv_dab_ct, managed=True)
+    from test_app.models import User
+
+    user = User.objects.create(username='testuser', email='test@example.com')
+    assignment = role_def.give_permission(user, inventory)
+
+    # Should return object_id (pk) instead of ansible_id
+    result = get_ansible_id_or_pk(assignment)
+    assert result == str(inventory.pk)
+
+
+@pytest.mark.django_db
+def test_get_content_object_for_non_org_team():
+    """Test get_content_object retrieves non-org/team objects by pk."""
+    from ansible_base.rbac.models import DABContentType, RoleDefinition
+    from ansible_base.resource_registry.tasks.sync import AssignmentTuple, get_content_object
+    from test_app.models import Inventory, Organization
+
+    # Create inventory
+    org = Organization.objects.create(name='Test Org')
+    inventory = Inventory.objects.create(name='Test Inventory', organization=org)
+    inv_dab_ct = DABContentType.objects.get_for_model(Inventory)
+
+    # Create role definition
+    role_def = RoleDefinition.objects.create(name='Inventory Admin', content_type=inv_dab_ct, managed=True)
+
+    # Create assignment tuple with pk (not ansible_id)
+    assignment_tuple = AssignmentTuple(
+        actor_ansible_id='user123',
+        ansible_id_or_pk=str(inventory.pk),
+        role_definition_name='Inventory Admin',
+        assignment_type='user',
+    )
+
+    result = get_content_object(role_def, assignment_tuple)
+    assert result == inventory
+
+
+@pytest.mark.django_db
+@mock.patch('ansible_base.resource_registry.tasks.sync.RemoteAssignmentFetcher._paginate')
+def test_get_remote_assignments_fails_on_user_pagination(mock_paginate):
+    """Test get_remote_assignments returns incomplete when user pagination fails."""
+    from ansible_base.resource_registry.tasks.sync import create_api_client, get_remote_assignments
+
+    # Make user pagination fail
+    mock_paginate.return_value = False
+
+    api_client = create_api_client()
+    result = get_remote_assignments(api_client)
+
+    # Should be incomplete when users_ok is False
+    assert result.is_complete is False
+    assert len(result.assignments) == 0
