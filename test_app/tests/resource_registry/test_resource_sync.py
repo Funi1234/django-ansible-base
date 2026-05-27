@@ -1012,6 +1012,35 @@ def test_assignment_tuple_equality_with_non_tuple():
     assert tuple1 != {'actor_ansible_id': 'user123'}
 
 
+def test_assignment_tuple_equality_comparison():
+    """Test AssignmentTuple.__eq__ field comparison for equal and unequal tuples."""
+    from ansible_base.resource_registry.tasks.sync import AssignmentTuple
+
+    tuple1 = AssignmentTuple(
+        actor_ansible_id='user123',
+        ansible_id_or_pk='obj456',
+        role_definition_name='Admin',
+        assignment_type='user',
+    )
+    tuple2 = AssignmentTuple(
+        actor_ansible_id='user123',
+        ansible_id_or_pk='obj456',
+        role_definition_name='Admin',
+        assignment_type='user',
+    )
+    tuple3 = AssignmentTuple(
+        actor_ansible_id='user999',
+        ansible_id_or_pk='obj456',
+        role_definition_name='Admin',
+        assignment_type='user',
+    )
+
+    # Test equality - should compare all fields
+    assert tuple1 == tuple2
+    # Test inequality - different actor_ansible_id
+    assert tuple1 != tuple3
+
+
 @pytest.mark.django_db
 def test_get_ansible_id_or_pk_for_non_org_team():
     """Test get_ansible_id_or_pk returns object_id for non-org/team models."""
