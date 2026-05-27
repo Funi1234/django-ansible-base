@@ -1204,3 +1204,72 @@ def test_create_local_assignment_for_team():
     # Should return True and create the team assignment
     assert result is True
     assert RoleTeamAssignment.objects.filter(team=team, role_definition=role_def, object_id=target_org.pk).exists()
+
+
+@pytest.mark.django_db
+def test_delete_local_assignment_with_object():
+    """Test delete_local_assignment removes object-scoped assignment."""
+    from ansible_base.rbac.models import DABContentType, RoleDefinition
+    from ansible_base.resource_registry.tasks.sync import AssignmentTuple, delete_local_assignment
+    from test_app.models import Organization, User
+
+    # Create user and organization with resources
+    user = User.objects.create(username='testuser', email='test@example.com')
+    user_resource = Resource.get_resource_for_object(user)
+    org = Organization.objects.create(name='Test Org')
+    org_resource = Resource.get_resource_for_object(org)
+    org_dab_ct = DABContentType.objects.get_for_model(Organization)
+
+    # Create role and assignment
+    role_def = RoleDefinition.objects.create(name='Org Admin', content_type=org_dab_ct, managed=True)
+    role_def.give_permission(user, org)
+
+    # Create assignment tuple for object-scoped assignment
+    assignment_tuple = AssignmentTuple(
+        actor_ansible_id=str(user_resource.ansible_id),
+        ansible_id_or_pk=str(org_resource.ansible_id),
+        role_definition_name='Org Admin',
+        assignment_type='user',
+    )
+
+    # Delete the assignment
+    result = delete_local_assignment(assignment_tuple)
+
+    # Should return True and remove the assignment
+    assert result is True
+    from ansible_base.rbac.models import RoleUserAssignment
+
+    assert not RoleUserAssignment.objects.filter(user=user, role_definition=role_def, object_id=org.pk).exists()
+
+
+@pytest.mark.django_db
+def test_delete_local_assignment_global():
+    """Test delete_local_assignment removes global assignment."""
+    from ansible_base.rbac.models import RoleDefinition
+    from ansible_base.resource_registry.tasks.sync import AssignmentTuple, delete_local_assignment
+    from test_app.models import User
+
+    # Create user with resource
+    user = User.objects.create(username='testuser', email='test@example.com')
+    user_resource = Resource.get_resource_for_object(user)
+
+    # Create global role and assignment
+    role_def = RoleDefinition.objects.create(name='Global Admin', managed=True)
+    role_def.give_global_permission(user)
+
+    # Create assignment tuple for global assignment
+    assignment_tuple = AssignmentTuple(
+        actor_ansible_id=str(user_resource.ansible_id),
+        ansible_id_or_pk=None,
+        role_definition_name='Global Admin',
+        assignment_type='user',
+    )
+
+    # Delete the assignment
+    result = delete_local_assignment(assignment_tuple)
+
+    # Should return True and remove global assignment
+    assert result is True
+    from ansible_base.rbac.models import RoleUserAssignment
+
+    assert not RoleUserAssignment.objects.filter(user=user, role_definition=role_def, object_id__isnull=True).exists()
