@@ -1244,7 +1244,7 @@ def test_delete_local_assignment_with_object():
 
 @pytest.mark.django_db
 def test_delete_local_assignment_global():
-    """Test delete_local_assignment removes global assignment."""
+    """Test delete_local_assignment removes global assignment"""
     from ansible_base.rbac.models import RoleDefinition
     from ansible_base.resource_registry.tasks.sync import AssignmentTuple, delete_local_assignment
     from test_app.models import User
