@@ -1078,3 +1078,100 @@ def test_get_remote_assignments_fails_on_user_pagination(mock_paginate):
     # Should be incomplete when users_ok is False
     assert result.is_complete is False
     assert len(result.assignments) == 0
+
+
+@pytest.mark.django_db
+def test_create_local_assignment_with_object():
+    """Test create_local_assignment creates object-scoped assignment."""
+    from ansible_base.rbac.models import DABContentType, RoleDefinition, RoleUserAssignment
+    from ansible_base.resource_registry.tasks.sync import AssignmentTuple, create_local_assignment
+    from test_app.models import Organization, User
+
+    # Create user and organization with resources
+    user = User.objects.create(username='testuser', email='test@example.com')
+    user_resource = Resource.get_resource_for_object(user)
+    org = Organization.objects.create(name='Test Org')
+    org_resource = Resource.get_resource_for_object(org)
+    org_dab_ct = DABContentType.objects.get_for_model(Organization)
+
+    # Create role definition
+    role_def = RoleDefinition.objects.create(name='Org Admin', content_type=org_dab_ct, managed=True)
+
+    # Create assignment tuple for object-scoped assignment
+    assignment_tuple = AssignmentTuple(
+        actor_ansible_id=str(user_resource.ansible_id),
+        ansible_id_or_pk=str(org_resource.ansible_id),
+        role_definition_name='Org Admin',
+        assignment_type='user',
+    )
+
+    # Create the assignment
+    result = create_local_assignment(assignment_tuple)
+
+    # Should return True and create the assignment
+    assert result is True
+    assert RoleUserAssignment.objects.filter(user=user, role_definition=role_def, object_id=org.pk).exists()
+
+
+@pytest.mark.django_db
+def test_create_local_assignment_global():
+    """Test create_local_assignment creates global assignment."""
+    from ansible_base.rbac.models import RoleDefinition, RoleUserAssignment
+    from ansible_base.resource_registry.tasks.sync import AssignmentTuple, create_local_assignment
+    from test_app.models import User
+
+    # Create user with resource
+    user = User.objects.create(username='testuser', email='test@example.com')
+    user_resource = Resource.get_resource_for_object(user)
+
+    # Create global role definition (no content_type)
+    role_def = RoleDefinition.objects.create(name='Global Admin', managed=True)
+
+    # Create assignment tuple for global assignment (no ansible_id_or_pk)
+    assignment_tuple = AssignmentTuple(
+        actor_ansible_id=str(user_resource.ansible_id),
+        ansible_id_or_pk=None,
+        role_definition_name='Global Admin',
+        assignment_type='user',
+    )
+
+    # Create the assignment
+    result = create_local_assignment(assignment_tuple)
+
+    # Should return True and create global assignment
+    assert result is True
+    assert RoleUserAssignment.objects.filter(user=user, role_definition=role_def, object_id__isnull=True).exists()
+
+
+@pytest.mark.django_db
+def test_create_local_assignment_for_team():
+    """Test create_local_assignment creates team assignment."""
+    from ansible_base.rbac.models import DABContentType, RoleDefinition, RoleTeamAssignment
+    from ansible_base.resource_registry.tasks.sync import AssignmentTuple, create_local_assignment
+    from test_app.models import Organization, Team
+
+    # Create team and organization with resources
+    org = Organization.objects.create(name='Test Org')
+    team = Team.objects.create(name='Test Team', organization=org)
+    team_resource = Resource.get_resource_for_object(team)
+    target_org = Organization.objects.create(name='Target Org')
+    target_org_resource = Resource.get_resource_for_object(target_org)
+    org_dab_ct = DABContentType.objects.get_for_model(Organization)
+
+    # Create role definition
+    role_def = RoleDefinition.objects.create(name='Org Admin', content_type=org_dab_ct, managed=True)
+
+    # Create assignment tuple for team assignment
+    assignment_tuple = AssignmentTuple(
+        actor_ansible_id=str(team_resource.ansible_id),
+        ansible_id_or_pk=str(target_org_resource.ansible_id),
+        role_definition_name='Org Admin',
+        assignment_type='team',
+    )
+
+    # Create the assignment
+    result = create_local_assignment(assignment_tuple)
+
+    # Should return True and create the team assignment
+    assert result is True
+    assert RoleTeamAssignment.objects.filter(team=team, role_definition=role_def, object_id=target_org.pk).exists()
