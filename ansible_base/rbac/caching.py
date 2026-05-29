@@ -49,6 +49,27 @@ def all_team_parents(team_id: int, team_team_parents: dict, seen: Optional[set] 
     return parent_team_ids
 
 
+def all_team_children(team_id: int, team_team_children: dict, seen: Optional[set] = None) -> set[int]:
+    """
+    Returns child teams, and child teams of child teams, until we have them all.
+    Mirror of all_team_parents but traversing the reverse direction.
+
+    team_id: id of the team we want to get the direct and indirect children of
+    team_team_children: mapping of team id to ids of its children (reverse of team_team_parents)
+    seen: mutable set to prevent infinite recursion in the event of loops
+    """
+    child_team_ids = set()
+    if seen is None:
+        seen = set()
+    for child_id in team_team_children.get(team_id, []):
+        if child_id in seen:
+            continue
+        child_team_ids.add(child_id)
+        seen.add(child_id)
+        child_team_ids.update(all_team_children(child_id, team_team_children, seen=seen))
+    return child_team_ids
+
+
 def get_org_team_mapping() -> dict[int, list[int]]:
     """
     Returns the teams in all organization as a dictionary.
@@ -173,11 +194,16 @@ def _safe_m2m_add(team, to_add):
                 logger.warning('Persistent IntegrityError adding member_roles for team %s, will be corrected on next recompute', team.id)
 
 
-def compute_team_member_roles():
+def compute_team_member_roles(team_ids=None):
     """
-    Fills in the ObjectRole.provides_teams relationship for all teams.
-    This relationship is a list of teams that the role grants membership for
-    This method is always ran globally.
+    Fills in the ObjectRole.provides_teams relationship for teams.
+    This relationship is a list of teams that the role grants membership for.
+
+    Args:
+        team_ids: Optional iterable of team IDs to scope the write phase.
+            When provided, only those teams (plus their descendants in the
+            team-of-team graph) have their member_roles updated.
+            When None, all teams are updated (global recompute).
     """
     # Manually prefetch the team to org memberships
     org_team_mapping = get_org_team_mapping()
@@ -198,8 +224,22 @@ def compute_team_member_roles():
             all_member_roles[team_id].update(set(direct_member_roles.get(parent_team_id, [])))
 
     # Great! we should be done building all_member_roles which tells what roles gives team membership for all teams
-    # now at this point we save that data
-    for team in permission_registry.team_model.objects.prefetch_related('member_roles'):
+    # now at this point we save that data, optionally scoped to specific teams
+    if team_ids is not None:
+        team_ids = set(team_ids)
+        # Expand to include descendants in the team-of-team graph
+        team_team_children = defaultdict(set)
+        for child, parents in team_team_parents.items():
+            for parent in parents:
+                team_team_children[parent].add(child)
+        expanded = set(team_ids)
+        for tid in team_ids:
+            expanded.update(all_team_children(tid, team_team_children))
+        teams_qs = permission_registry.team_model.objects.filter(id__in=expanded)
+    else:
+        teams_qs = permission_registry.team_model.objects.all()
+
+    for team in teams_qs.prefetch_related('member_roles'):
         # NOTE: the .set method will not use the prefetched data, thus the messy implementation here
         existing_ids = set(r.id for r in team.member_roles.all())
         expected_ids = set(all_member_roles.get(team.id, []))

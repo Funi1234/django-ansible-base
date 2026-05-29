@@ -312,7 +312,7 @@ class RoleDefinition(CommonModel):
 
         from ansible_base.rbac.triggers import needed_updates_on_assignment, update_after_assignment
 
-        update_teams, to_update = needed_updates_on_assignment(self, actor, object_role, created=created, giving=True)
+        recompute_team_ids, to_update = needed_updates_on_assignment(self, actor, object_role, created=created, giving=True)
 
         assignment = None
         if actor._meta.model_name == 'user':
@@ -331,7 +331,7 @@ class RoleDefinition(CommonModel):
                 to_update.remove(object_role)
             object_role.delete()
 
-        update_after_assignment(update_teams, to_update)
+        update_after_assignment(recompute_team_ids, to_update)
 
         return assignment
 
