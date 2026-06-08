@@ -7,6 +7,9 @@ coverage:
     # Test files and directories
     - "**/tests/**"
     - "test_app/**"
+    - "**/test_*.py"
+    - "**/*_test.py"
+    - "**/conftest.py"
 
     # Django-specific files
     - "**/migrations/**"
