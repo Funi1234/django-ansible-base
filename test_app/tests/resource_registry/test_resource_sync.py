@@ -456,7 +456,7 @@ def test_get_remote_assignments_incomplete_on_failure(failure_mode):
     api_client = mock.Mock(spec=["list_user_assignments", "list_team_assignments"])
     page1 = _mock_response(
         body={
-            "results": [{"user_ansible_id": "u1", "object_ansible_id": "o1", "role_definition": "Team Member"}],
+            "results": [{"user_ansible_id": "u1", "object_ansible_id": "o1", "object_id": "o1", "role_definition": "Team Member"}],
             "next": "http://example.com/page2",
         }
     )
@@ -497,6 +497,7 @@ def test_get_remote_assignments_complete_on_success():
 
 
 @pytest.mark.django_db
+@pytest.mark.django_db
 def test_get_remote_assignments_filters_unknown_roles(static_api_client):
     """Assignments for roles that do not exist locally should be filtered out.
 
@@ -512,12 +513,14 @@ def test_get_remote_assignments_filters_unknown_roles(static_api_client):
             {
                 'user_ansible_id': 'aaaaaaaa-1111-2222-3333-444444444444',
                 'object_ansible_id': '1',
+                'object_id': '1',
                 'role_definition': local_role.name,
             },
             # Assignment for a role from another service — should be filtered out
             {
                 'user_ansible_id': 'bbbbbbbb-1111-2222-3333-444444444444',
                 'object_ansible_id': '1',
+                'object_id': '1',
                 'role_definition': 'Credential Admin',
             },
         ],
@@ -529,6 +532,7 @@ def test_get_remote_assignments_filters_unknown_roles(static_api_client):
             {
                 'team_ansible_id': 'cccccccc-1111-2222-3333-444444444444',
                 'object_ansible_id': '1',
+                'object_id': '1',
                 'role_definition': 'Some Other Service Role',
             },
         ],
@@ -719,7 +723,7 @@ def test_remote_assignment_fetcher_multi_page_with_assignments():
     page1 = _mock_response(
         body={
             'results': [
-                {'user_ansible_id': 'u1', 'object_ansible_id': 'obj1', 'role_definition': 'MultiPageRole'},
+                {'user_ansible_id': 'u1', 'object_ansible_id': 'obj1', 'object_id': 'obj1', 'role_definition': 'MultiPageRole'},
             ],
             'next': 'http://example.com/page2',
         }
@@ -727,7 +731,7 @@ def test_remote_assignment_fetcher_multi_page_with_assignments():
     page2 = _mock_response(
         body={
             'results': [
-                {'user_ansible_id': 'u2', 'object_ansible_id': 'obj2', 'role_definition': 'MultiPageRole'},
+                {'user_ansible_id': 'u2', 'object_ansible_id': 'obj2', 'object_id': 'obj2', 'role_definition': 'MultiPageRole'},
             ],
             'next': None,
         }
@@ -793,6 +797,97 @@ def test_remote_assignment_fetcher_uses_object_id_fallback():
     assert len(result.assignments) == 1
     assignment = next(iter(result.assignments))
     assert assignment.ansible_id_or_pk == '42'
+
+
+@pytest.mark.django_db
+def test_collect_known_uuids_returns_uuids_found_in_resource_table():
+    """_collect_known_uuids returns only UUIDs that have a matching Resource row."""
+    from ansible_base.authentication.models import Authenticator
+
+    auth = Authenticator.objects.create(
+        name='test-auth-uuid-known',
+        enabled=False,
+        type='ansible_base.authentication.authenticator_plugins.local',
+    )
+    resource = Resource.get_resource_for_object(auth)
+    known_uuid = str(resource.ansible_id)
+    unknown_uuid = str(uuid4())
+
+    results = [
+        {'object_ansible_id': known_uuid},
+        {'object_ansible_id': unknown_uuid},
+        {'object_ansible_id': 'not-a-uuid'},  # invalid — should be skipped
+        {},  # no object_ansible_id — should be skipped
+    ]
+
+    known = RemoteAssignmentFetcher._collect_known_uuids(results)
+
+    assert known_uuid in known
+    assert unknown_uuid not in known
+    assert 'not-a-uuid' not in known
+
+
+def test_collect_known_uuids_empty_results():
+    """_collect_known_uuids returns an empty set when results have no valid UUIDs."""
+    assert RemoteAssignmentFetcher._collect_known_uuids([]) == set()
+    assert RemoteAssignmentFetcher._collect_known_uuids([{'object_ansible_id': 'bad'}]) == set()
+    assert RemoteAssignmentFetcher._collect_known_uuids([{}]) == set()
+
+
+def test_resolve_ansible_id_or_pk_uses_uuid_when_known():
+    """_resolve_ansible_id_or_pk returns the UUID when it is in known_uuids."""
+    uuid = str(uuid4())
+    assignment = {'object_ansible_id': uuid, 'object_id': '10'}
+    result = RemoteAssignmentFetcher._resolve_ansible_id_or_pk(assignment, {uuid})
+    assert result == uuid
+
+
+def test_resolve_ansible_id_or_pk_falls_back_when_uuid_unknown():
+    """_resolve_ansible_id_or_pk falls back to object_id when UUID is not known."""
+    assignment = {'object_ansible_id': str(uuid4()), 'object_id': '10'}
+    result = RemoteAssignmentFetcher._resolve_ansible_id_or_pk(assignment, set())
+    assert result == '10'
+
+
+def test_resolve_ansible_id_or_pk_no_uuid():
+    """_resolve_ansible_id_or_pk returns object_id when object_ansible_id is absent."""
+    assignment = {'object_id': '10'}
+    result = RemoteAssignmentFetcher._resolve_ansible_id_or_pk(assignment, set())
+    assert result == '10'
+
+
+@pytest.mark.django_db
+def test_paginate_uses_uuid_when_resource_row_exists():
+    """_paginate uses object_ansible_id when Hub has a matching Resource row."""
+    from ansible_base.authentication.models import Authenticator
+
+    auth = Authenticator.objects.create(
+        name='test-auth-paginate-uuid',
+        enabled=False,
+        type='ansible_base.authentication.authenticator_plugins.local',
+    )
+    resource = Resource.get_resource_for_object(auth)
+    known_uuid = str(resource.ansible_id)
+
+    RoleDefinition.objects.create(name='UUIDRole', managed=True)
+
+    api_client = mock.Mock(spec=["list_user_assignments", "list_team_assignments"])
+    api_client.list_user_assignments.return_value = _mock_response(
+        body={
+            'results': [
+                {'user_ansible_id': str(uuid4()), 'object_ansible_id': known_uuid, 'object_id': str(auth.pk), 'role_definition': 'UUIDRole'},
+            ],
+            'next': None,
+        }
+    )
+    api_client.list_team_assignments.return_value = _mock_response()
+
+    result = RemoteAssignmentFetcher(api_client).fetch()
+
+    assert result.is_complete is True
+    assert len(result.assignments) == 1
+    assignment = next(iter(result.assignments))
+    assert assignment.ansible_id_or_pk == known_uuid
 
 
 @pytest.mark.django_db

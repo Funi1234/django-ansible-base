@@ -5,8 +5,10 @@ import pytest
 from ansible_base.rbac.role_sync_utils import (
     _SKIP,
     AssignmentTuple,
+    _bulk_resolve_object_ansible_ids,
     _collect_assignment_tuples,
     _resolve_object_ansible_id,
+    get_ansible_id_or_pk,
     get_content_object,
     get_local_assignments,
 )
@@ -66,23 +68,23 @@ def test_resolve_object_ansible_id_global_assignment():
 
 
 def test_resolve_object_ansible_id_non_org_team():
-    """Non-org/team types return the raw object_id."""
-    ct = mock.Mock(model='inventory')
+    """Non-org/team types return the raw object_id when no map entry."""
+    ct = mock.Mock(model='inventory', app_label='test_app')
     assignment = mock.Mock(object_id='42', content_type=ct)
     assert _resolve_object_ansible_id(assignment, {}) == '42'
 
 
 def test_resolve_object_ansible_id_org_resolved():
     """Org/team types return the resolved ansible_id from the map."""
-    ct = mock.Mock(model='organization')
+    ct = mock.Mock(model='organization', app_label='test_app')
     assignment = mock.Mock(object_id='7', content_type=ct)
-    object_map = {('7', 'organization'): 'resolved-uuid'}
+    object_map = {('7', 'test_app', 'organization'): 'resolved-uuid'}
     assert _resolve_object_ansible_id(assignment, object_map) == 'resolved-uuid'
 
 
 def test_resolve_object_ansible_id_org_missing():
     """Missing org/team resource returns _SKIP sentinel."""
-    ct = mock.Mock(model='organization')
+    ct = mock.Mock(model='organization', app_label='test_app')
     assignment = mock.Mock(object_id='999', content_type=ct)
     assert _resolve_object_ansible_id(assignment, {}) is _SKIP
 
@@ -325,3 +327,187 @@ def test_backward_compat_imports():
         get_local_assignments,
         get_remote_assignments,
     )
+
+
+# ---------------------------------------------------------------------------
+# AAP-77392 — namespace-scoped role sync: UUID resolution for all content types
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+def test_get_content_object_resolves_uuid_for_non_org_team_type():
+    """get_content_object resolves a UUID ansible_id via Resource for any content type.
+
+    Regression test for AAP-77392: previously only org/team used Resource lookup,
+    so namespace-scoped UUIDs caused "Field 'id' expected a number" ValueError.
+    """
+    from ansible_base.authentication.models import Authenticator
+    from ansible_base.rbac.models import DABContentType
+
+    auth = Authenticator.objects.create(
+        name='test-auth-uuid',
+        enabled=False,
+        type='ansible_base.authentication.authenticator_plugins.local',
+    )
+    auth_resource = Resource.get_resource_for_object(auth)
+    auth_ct = DABContentType.objects.get_for_model(Authenticator)
+
+    rd = mock.Mock()
+    rd.content_type = auth_ct
+
+    at = AssignmentTuple('actor-uuid', str(auth_resource.ansible_id), 'Some Role', 'user')
+    result = get_content_object(rd, at)
+    assert result == auth
+
+
+@pytest.mark.django_db
+def test_get_content_object_falls_back_to_pk_when_no_resource_entry():
+    """get_content_object falls back to integer PK lookup when no Resource entry exists."""
+    from django.contrib.contenttypes.models import ContentType
+
+    from ansible_base.authentication.models import Authenticator
+    from ansible_base.rbac.models import DABContentType
+
+    auth = Authenticator.objects.create(
+        name='test-auth-pk',
+        enabled=False,
+        type='ansible_base.authentication.authenticator_plugins.local',
+    )
+    auth_ct = DABContentType.objects.get_for_model(Authenticator)
+    base_ct = ContentType.objects.get_for_model(Authenticator)
+
+    Resource.objects.filter(object_id=auth.pk, content_type=base_ct).delete()
+
+    rd = mock.Mock()
+    rd.content_type = auth_ct
+
+    at = AssignmentTuple('actor-uuid', str(auth.pk), 'Some Role', 'user')
+    result = get_content_object(rd, at)
+    assert result == auth
+
+
+@pytest.mark.django_db
+def test_get_ansible_id_or_pk_returns_uuid_for_registered_non_org_team():
+    """get_ansible_id_or_pk returns the Resource ansible_id for non-org/team registered types.
+
+    Regression test for AAP-77392: previously returned raw integer PK for all
+    non-org/team types, causing local tuples to not match remote UUID-keyed tuples.
+    """
+    from ansible_base.authentication.models import Authenticator
+
+    auth = Authenticator.objects.create(
+        name='test-auth-ansid',
+        enabled=False,
+        type='ansible_base.authentication.authenticator_plugins.local',
+    )
+    auth_resource = Resource.get_resource_for_object(auth)
+
+    assignment = mock.Mock()
+    assignment.object_id = auth.pk
+    assignment.content_type.model = 'authenticator'
+    assignment.content_type.pk = auth_resource.content_type_id
+    # Use real content_type so filter(content_type=...) works
+    from ansible_base.rbac.models import DABContentType
+
+    assignment.content_type = DABContentType.objects.get_for_model(Authenticator)
+
+    result = get_ansible_id_or_pk(assignment)
+    assert result == str(auth_resource.ansible_id)
+
+
+@pytest.mark.django_db
+def test_get_ansible_id_or_pk_falls_back_to_pk_when_no_resource():
+    """get_ansible_id_or_pk falls back to integer PK for types with no Resource entry."""
+    from django.contrib.contenttypes.models import ContentType
+
+    from ansible_base.authentication.models import Authenticator
+    from ansible_base.rbac.models import DABContentType
+
+    auth = Authenticator.objects.create(
+        name='test-auth-pkfallback',
+        enabled=False,
+        type='ansible_base.authentication.authenticator_plugins.local',
+    )
+    auth_ct = DABContentType.objects.get_for_model(Authenticator)
+    base_ct = ContentType.objects.get_for_model(Authenticator)
+    Resource.objects.filter(object_id=auth.pk, content_type=base_ct).delete()
+
+    assignment = mock.Mock()
+    assignment.object_id = auth.pk
+    assignment.content_type = auth_ct
+
+    result = get_ansible_id_or_pk(assignment)
+    assert result == str(auth.pk)
+
+
+def test_resolve_object_ansible_id_non_org_team_with_resource_entry():
+    """_resolve_object_ansible_id uses the object_map for non-org/team types when present."""
+    ct = mock.Mock(model='authenticator', app_label='authentication')
+    assignment = mock.Mock(object_id='5', content_type=ct)
+    object_map = {('5', 'authentication', 'authenticator'): 'some-uuid-value'}
+    assert _resolve_object_ansible_id(assignment, object_map) == 'some-uuid-value'
+
+
+def test_resolve_object_ansible_id_non_org_team_without_resource_entry():
+    """_resolve_object_ansible_id falls back to raw PK for non-org/team with no map entry."""
+    ct = mock.Mock(model='authenticator', app_label='authentication')
+    assignment = mock.Mock(object_id='5', content_type=ct)
+    assert _resolve_object_ansible_id(assignment, {}) == '5'
+
+
+@pytest.mark.django_db
+def test_bulk_resolve_object_ansible_ids_includes_non_org_team():
+    """_bulk_resolve_object_ansible_ids resolves UUIDs for all registered content types."""
+    from ansible_base.authentication.models import Authenticator
+    from ansible_base.rbac.models import DABContentType
+
+    auth = Authenticator.objects.create(
+        name='test-auth-bulk',
+        enabled=False,
+        type='ansible_base.authentication.authenticator_plugins.local',
+    )
+    auth_ct = DABContentType.objects.get_for_model(Authenticator)
+    auth_resource = Resource.get_resource_for_object(auth)
+
+    assignment = mock.Mock()
+    assignment.object_id = auth.pk
+    assignment.content_type = auth_ct
+
+    result = _bulk_resolve_object_ansible_ids([assignment])
+    key = (str(auth.pk), auth_ct.app_label, 'authenticator')
+    assert key in result
+    assert result[key] == str(auth_resource.ansible_id)
+
+
+@pytest.mark.django_db
+def test_get_local_assignments_uses_uuid_for_registered_non_org_team():
+    """Local assignments for non-org/team registered types carry the ansible_id UUID.
+
+    End-to-end regression test for AAP-77392: ensures set comparison between
+    local and remote assignments matches when both use UUIDs.
+    """
+    from ansible_base.authentication.models import Authenticator
+    from ansible_base.rbac.models import DABContentType, RoleDefinition
+    from test_app.models import User
+
+    user = User.objects.create(username='ns_user_77392', email='ns77392@test.com')
+    user_resource = Resource.get_resource_for_object(user)
+    auth = Authenticator.objects.create(
+        name='test-auth-local-assign',
+        enabled=False,
+        type='ansible_base.authentication.authenticator_plugins.local',
+    )
+    auth_resource = Resource.get_resource_for_object(auth)
+    auth_ct = DABContentType.objects.get_for_model(Authenticator)
+
+    rd = RoleDefinition.objects.create(name='Auth Owner 77392', content_type=auth_ct, managed=True)
+    rd.give_permission(user, auth)
+
+    assignments = get_local_assignments()
+    matching = [a for a in assignments if a.role_definition_name == 'Auth Owner 77392']
+
+    assert len(matching) == 1
+    assert matching[0].actor_ansible_id == str(user_resource.ansible_id)
+    # Must be the UUID from the Resource registry, not the integer PK
+    assert matching[0].ansible_id_or_pk == str(auth_resource.ansible_id)
+    assert matching[0].ansible_id_or_pk != str(auth.pk)

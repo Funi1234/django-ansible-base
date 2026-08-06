@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import uuid as _uuid_module
 from dataclasses import dataclass
 from typing import Any
 
@@ -48,22 +49,25 @@ class AssignmentTuple:
 def get_ansible_id_or_pk(assignment) -> str:
     """Resolve the ansible_id or raw PK for an assignment's target object.
 
-    For organization/team content types the object's ``ansible_id`` is
-    looked up via the Resource table.  For all other types the raw
-    ``object_id`` is returned directly.
+    Looks up the object's ``ansible_id`` via the Resource table for all
+    content types that have a registry entry, so local tuples carry the same
+    UUID that Gateway sends in ``object_ansible_id``.  Falls back to the raw
+    ``object_id`` for types without a Resource entry.  Raises for
+    organization/team objects that are missing a Resource entry, as those
+    must always be registered.
     """
     if not is_rbac_installed():
         raise RuntimeError("get_ansible_id_or_pk requires ansible_base.rbac to be installed")
+    object_resource = Resource.objects.filter(
+        object_id=assignment.object_id,
+        content_type__app_label=assignment.content_type.app_label,
+        content_type__model=assignment.content_type.model,
+    ).first()
+    if object_resource:
+        return str(object_resource.ansible_id)
     if assignment.content_type.model in ('organization', 'team'):
-        object_resource = Resource.objects.filter(object_id=assignment.object_id, content_type__model=assignment.content_type.model).first()
-        if object_resource:
-            ansible_id_or_pk = object_resource.ansible_id
-        else:
-            raise RuntimeError(f"Error: {assignment.content_type.model} {assignment.object_id} was found without an associated Resource.")
-    else:
-        ansible_id_or_pk = assignment.object_id
-
-    return str(ansible_id_or_pk)
+        raise RuntimeError(f"Error: {assignment.content_type.model} {assignment.object_id} was found without an associated Resource.")
+    return str(assignment.object_id)
 
 
 def get_content_object(role_definition, assignment_tuple: AssignmentTuple) -> Any:
@@ -72,9 +76,16 @@ def get_content_object(role_definition, assignment_tuple: AssignmentTuple) -> An
         raise RuntimeError("get_content_object requires ansible_base.rbac to be installed")
     if role_definition.content_type is None:
         raise ValueError("get_content_object requires a role_definition with a content_type")
-    if role_definition.content_type.model in ('organization', 'team'):
-        object_resource = Resource.objects.get(ansible_id=assignment_tuple.ansible_id_or_pk)
-        return object_resource.content_object
+    # Try Resource registry first — handles UUID ansible_ids from Gateway for all content types,
+    # not only organization and team.  Only attempt when the value is a valid UUID; integer PKs
+    # would cause a UUIDField ValidationError in the filter.
+    try:
+        _uuid_module.UUID(str(assignment_tuple.ansible_id_or_pk))
+        resource = Resource.objects.filter(ansible_id=assignment_tuple.ansible_id_or_pk).first()
+        if resource is not None:
+            return resource.content_object
+    except (ValueError, AttributeError):
+        pass
     model = role_definition.content_type.model_class()
     return model.objects.get(pk=assignment_tuple.ansible_id_or_pk)
 
@@ -101,52 +112,64 @@ def _bulk_resolve_actor_ansible_ids(assignments: list, actor_attr: str) -> dict[
     }
 
 
-def _bulk_resolve_object_ansible_ids(assignments: list) -> dict[tuple[str, str], str]:
-    """Build a ``{(str(object_id), model_name): str(ansible_id)}`` map for org/team objects.
+def _bulk_resolve_object_ansible_ids(assignments: list) -> dict[tuple[str, str, str], str]:
+    """Build a ``{(str(object_id), app_label, model): str(ansible_id)}`` map for all resource-registered objects.
 
-    Only organization and team content types need Resource lookups — all
-    other types use the raw ``object_id`` directly.
+    Resolves ansible_ids for every content type that has a Resource entry,
+    not only organization and team.  The caller falls back to the raw
+    ``object_id`` for types with no entry in the result map.
+
+    Keys on ``(object_id, app_label, model)`` rather than ``(object_id, model)``
+    to avoid collisions when two DABContentType services share a model name.
     """
-    org_team_ids = set()
+    object_ids: set[str] = set()
+    app_labels: set[str] = set()
+    model_names: set[str] = set()
     for a in assignments:
-        if a.object_id and a.content_type and a.content_type.model in ('organization', 'team'):
-            org_team_ids.add(str(a.object_id))
+        if a.object_id and a.content_type:
+            object_ids.add(str(a.object_id))
+            app_labels.add(a.content_type.app_label)
+            model_names.add(a.content_type.model)
 
-    if not org_team_ids:
+    if not object_ids:
         return {}
 
     return {
-        (str(obj_id), model): str(ansible_id)
-        for obj_id, model, ansible_id in Resource.objects.filter(
-            object_id__in=org_team_ids,
-            content_type__model__in=['organization', 'team'],
-        ).values_list('object_id', 'content_type__model', 'ansible_id')
+        (str(obj_id), app_label, model): str(ansible_id)
+        for obj_id, app_label, model, ansible_id in Resource.objects.filter(
+            object_id__in=object_ids,
+            content_type__app_label__in=app_labels,
+            content_type__model__in=model_names,
+        ).values_list('object_id', 'content_type__app_label', 'content_type__model', 'ansible_id')
     }
 
 
 _SKIP = object()
 
 
-def _resolve_object_ansible_id(assignment, object_map: dict[tuple[str, str], str]):
+def _resolve_object_ansible_id(assignment, object_map: dict[tuple[str, str, str], str]):
     """Resolve the ansible_id or pk for an assignment's target object.
 
-    Returns ``None`` for global assignments, the resolved ansible_id for
-    org/team objects, the raw ``object_id`` for other types, or the
-    sentinel ``_SKIP`` if an org/team resource is missing.
+    Returns ``None`` for global assignments, the resolved ansible_id if one
+    exists in the Resource registry, the raw ``object_id`` for types without
+    a registry entry, or the sentinel ``_SKIP`` if an org/team object is
+    missing a Resource entry (those must always be registered).
     """
     if not assignment.object_id or not assignment.content_type:
         return None
 
     model_name = assignment.content_type.model
-    if model_name not in ('organization', 'team'):
-        return str(assignment.object_id)
-
-    key = (str(assignment.object_id), model_name)
+    key = (str(assignment.object_id), assignment.content_type.app_label, model_name)
     resolved = object_map.get(key)
-    if resolved is None:
+    if resolved is not None:
+        return resolved
+
+    if model_name in ('organization', 'team'):
         logger.error(f"{model_name} {assignment.object_id} found without an associated Resource, skipping assignment.")
         return _SKIP
-    return resolved
+
+    # For types without a Resource registry entry, fall back to the raw integer PK.
+    return str(assignment.object_id)
 
 
 def _collect_assignment_tuples(

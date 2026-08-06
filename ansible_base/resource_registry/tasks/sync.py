@@ -4,6 +4,7 @@ import asyncio
 import csv
 import logging
 import time
+import uuid as _uuid_mod
 from collections import defaultdict
 from dataclasses import dataclass, field
 from enum import Enum
@@ -131,6 +132,56 @@ class RemoteAssignmentFetcher:
         teams_ok = self._paginate(self.api_client.list_team_assignments, 'team_ansible_id', 'team')
         return RemoteAssignmentResult(assignments=self.assignments, is_complete=teams_ok)
 
+    @staticmethod
+    def _collect_known_uuids(results: list) -> set:
+        """Return the Resource ansible_ids Hub recognises from a page of assignments.
+
+        Only values that parse as valid UUIDs are queried — non-UUID strings
+        (e.g. plain integers) would raise a UUIDField ValidationError in the DB.
+        """
+        candidate_uuids = set()
+        for item in results:
+            val = item.get('object_ansible_id')
+            if val:
+                try:
+                    _uuid_mod.UUID(str(val))
+                    candidate_uuids.add(str(val))
+                except (ValueError, AttributeError):
+                    pass
+        if not candidate_uuids:
+            return set()
+        return {str(u) for u in Resource.objects.filter(ansible_id__in=candidate_uuids).values_list('ansible_id', flat=True)}
+
+    @staticmethod
+    def _resolve_ansible_id_or_pk(assignment: dict, known_uuids: set) -> str | None:
+        """Return the identifier to use for an assignment's target object.
+
+        Prefers object_ansible_id when Hub has a matching Resource row so both
+        sides of the set comparison carry the same UUID (AAP-77392). Falls back
+        to integer object_id for types without a Resource registry entry.
+        """
+        uuid_val = assignment.get('object_ansible_id')
+        if uuid_val and str(uuid_val) in known_uuids:
+            return str(uuid_val)
+        return assignment.get('object_id')
+
+    def _process_page(self, results: list, actor_id_key: str, assignment_type: str) -> None:
+        """Add valid assignments from a single response page to ``self.assignments``."""
+        known_uuids = self._collect_known_uuids(results)
+        for assignment in results:
+            role_name = assignment['role_definition']
+            if role_name not in self.local_role_names:
+                logger.debug(f"Skipping remote {assignment_type} assignment with unknown local role: {role_name}")
+                continue
+            self.assignments.add(
+                AssignmentTuple(
+                    actor_ansible_id=assignment[actor_id_key],
+                    ansible_id_or_pk=self._resolve_ansible_id_or_pk(assignment, known_uuids),
+                    role_definition_name=role_name,
+                    assignment_type=assignment_type,
+                )
+            )
+
     def _paginate(self, list_fn, actor_id_key: str, assignment_type: str) -> bool:
         """Paginate a single assignment endpoint, adding results to ``self.assignments``.
 
@@ -148,20 +199,7 @@ class RemoteAssignmentFetcher:
                     return False
 
                 data = resp.json()
-                for assignment in data.get('results') or []:
-                    role_name = assignment['role_definition']
-                    if role_name not in self.local_role_names:
-                        logger.debug(f"Skipping remote {assignment_type} assignment with unknown local role: {role_name}")
-                        continue
-                    ansible_id_or_pk = assignment.get('object_ansible_id') or assignment.get('object_id')
-                    self.assignments.add(
-                        AssignmentTuple(
-                            actor_ansible_id=assignment[actor_id_key],
-                            ansible_id_or_pk=ansible_id_or_pk,
-                            role_definition_name=role_name,
-                            assignment_type=assignment_type,
-                        )
-                    )
+                self._process_page(data.get('results') or [], actor_id_key, assignment_type)
 
                 if not data.get('next'):
                     return True
