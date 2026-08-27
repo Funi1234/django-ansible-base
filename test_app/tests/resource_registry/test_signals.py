@@ -42,7 +42,7 @@ def test_registered_model_triggers_signals(model, system_user):
 
 
 @pytest.mark.django_db
-def test_decide_to_sync_update_skips_class_level_flag(organization):
+def test_decide_to_sync_update_skips_class_level_flag(organization, monkeypatch):
     """decide_to_sync_update returns before touching serializer_class when the model sets the flag at the class level.
 
     Models registered without a managed_serializer (serializer_class=None) set
@@ -52,24 +52,21 @@ def test_decide_to_sync_update_skips_class_level_flag(organization):
     Without this fix, the handler would reach serializer_class().get_fields() and raise:
         TypeError: 'NoneType' object is not callable
     """
-    Organization._skip_reverse_resource_sync = True
-    try:
-        with mock.patch.object(handlers, 'Resource') as mock_resource:
-            organization.name = 'changed'
-            handlers.decide_to_sync_update(
-                sender=Organization,
-                instance=organization,
-                raw=False,
-                using='default',
-                update_fields=None,
-            )
-        mock_resource.get_resource_for_object.assert_not_called()
-    finally:
-        del Organization._skip_reverse_resource_sync
+    monkeypatch.setattr(Organization, '_skip_reverse_resource_sync', True, raising=False)
+    with mock.patch.object(handlers, 'Resource') as mock_resource:
+        organization.name = 'changed'
+        handlers.decide_to_sync_update(
+            sender=Organization,
+            instance=organization,
+            raw=False,
+            using='default',
+            update_fields=None,
+        )
+    mock_resource.get_resource_for_object.assert_not_called()
 
 
 @pytest.mark.django_db
-def test_pre_delete_sync_skips_class_level_flag(organization):
+def test_pre_delete_sync_skips_class_level_flag(organization, monkeypatch):
     """sync_to_resource_server_pre_delete returns early when the model sets the flag at the class level.
 
     Models that opt out of reverse sync must not trigger a Gateway sync on delete.
@@ -79,13 +76,10 @@ def test_pre_delete_sync_skips_class_level_flag(organization):
         AttributeError: '<Model>' object has no attribute 'resource'
     (Resource uses GenericForeignKey — no automatic reverse accessor exists on the instance.)
     """
-    Organization._skip_reverse_resource_sync = True
-    try:
-        with mock.patch('ansible_base.resource_registry.signals.handlers.sync_to_resource_server') as mock_sync:
-            handlers.sync_to_resource_server_pre_delete(sender=Organization, instance=organization)
-        mock_sync.assert_not_called()
-    finally:
-        del Organization._skip_reverse_resource_sync
+    monkeypatch.setattr(Organization, '_skip_reverse_resource_sync', True, raising=False)
+    with mock.patch('ansible_base.resource_registry.signals.handlers.sync_to_resource_server') as mock_sync:
+        handlers.sync_to_resource_server_pre_delete(sender=Organization, instance=organization)
+    mock_sync.assert_not_called()
 
 
 @pytest.mark.django_db
