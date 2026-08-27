@@ -89,6 +89,34 @@ def test_pre_delete_sync_skips_class_level_flag(organization):
 
 
 @pytest.mark.django_db
+def test_pre_delete_sync_resource_not_found(organization):
+    """sync_to_resource_server_pre_delete logs a warning and skips sync when the Resource row is absent."""
+    with (
+        mock.patch.object(handlers, 'Resource') as mock_resource,
+        mock.patch('ansible_base.resource_registry.signals.handlers.sync_to_resource_server') as mock_sync,
+    ):
+        mock_resource.DoesNotExist = Resource.DoesNotExist
+        mock_resource.get_resource_for_object.side_effect = Resource.DoesNotExist
+        handlers.sync_to_resource_server_pre_delete(sender=Organization, instance=organization)
+    mock_sync.assert_not_called()
+
+
+@pytest.mark.django_db
+def test_pre_delete_sync_calls_sync_to_resource_server(organization):
+    """sync_to_resource_server_pre_delete passes the resource ansible_id to sync_to_resource_server."""
+    mock_resource_obj = mock.MagicMock()
+    mock_resource_obj.ansible_id = 'test-ansible-id-123'
+    with (
+        mock.patch.object(handlers, 'Resource') as mock_resource,
+        mock.patch('ansible_base.resource_registry.signals.handlers.sync_to_resource_server') as mock_sync,
+    ):
+        mock_resource.DoesNotExist = Resource.DoesNotExist
+        mock_resource.get_resource_for_object.return_value = mock_resource_obj
+        handlers.sync_to_resource_server_pre_delete(sender=Organization, instance=organization)
+    mock_sync.assert_called_once_with(organization, "delete", ansible_id='test-ansible-id-123')
+
+
+@pytest.mark.django_db
 def test_decide_to_sync_update_with_create(enable_reverse_sync):
     with enable_reverse_sync(mock_away_sync=True):
         org = Organization.objects.create(name='Hello')
