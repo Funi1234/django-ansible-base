@@ -37,6 +37,7 @@ def check_expansion_syntax(value: Optional[str]) -> Optional[TranslatedString]:
 
     if has_expansion(value) and not _EXPANSION_RE.search(value):
         return _("Expansion only supports the format {% for_attr_value(attribute) %}")
+    return None
 
 
 def expand_syntax(attributes: dict, auth_map: AuthenticatorMap) -> list[Dict[str, str]]:
@@ -191,7 +192,7 @@ def check_role_type(map_type: Optional[str], role: Optional[str], org: Optional[
 
     if not _is_rbac_installed():
         errors['role'] = _("You specified a role without RBAC installed ")
-        return errors
+        return errors  # type: ignore[return-value]
 
     from ansible_base.rbac.models import RoleDefinition
 
@@ -201,7 +202,7 @@ def check_role_type(map_type: Optional[str], role: Optional[str], org: Optional[
 
         # system role is allowed for map type == role without further conditions
         if is_system_role and map_type == 'role':
-            return errors
+            return errors  # type: ignore[return-value]
 
         is_org_role, is_team_role = False, False
         if not is_system_role:
@@ -227,4 +228,4 @@ def check_role_type(map_type: Optional[str], role: Optional[str], org: Optional[
     except ObjectDoesNotExist:
         errors['role'] = _("RoleDefinition {role} doesn't exist").format(role=role)
 
-    return errors
+    return errors  # type: ignore[return-value]
